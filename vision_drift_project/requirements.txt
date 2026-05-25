@@ -4,3 +4,4 @@ torchdrift
 scikit-learn
 matplotlib
 numpy
+tqdm
