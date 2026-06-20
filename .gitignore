@@ -151,3 +151,11 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+vision_drift_project/data/*
+!vision_drift_project/data/.gitkeep
+vision_drift_project/models/*
+!vision_drift_project/models/.gitkeep
+vision_drift_project/reference_state/*
+!vision_drift_project/reference_state/.gitkeep
+*.png
