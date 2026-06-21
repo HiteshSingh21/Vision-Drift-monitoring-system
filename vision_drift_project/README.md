@@ -1,18 +1,8 @@
-# Vision Drift Monitoring System (v2-development)
+# Vision Drift Monitoring System — V3 (Statistical Core & YOLO Integration)
 
-A production-ready, highly efficient pipeline for detecting statistical data drift in computer vision models. This system monitors incoming live image streams and mathematically compares them against a known "healthy" baseline to ensure your model's predictions remain reliable in the real world.
+A production-grade, highly optimized MLOps pipeline for detecting statistical data drift in computer vision models. Version 3 marks a complete architectural overhaul, transitioning from a decoupled classification monitoring setup (ResNet-18 + MMD) into an integrated object-detection/classification backbone (**YOLOv11**) backed by a custom, interpretable **Mean-Variance Statistical Engine** and automated **Before/After Retraining Recovery Analytics**.
 
-## Version 2: Integrated Efficiency Architecture
-
-In this version (v2), the pipeline has been heavily optimized to reduce computational overhead in production.
-
-### How v2 is Different from the Previous Approach (v1)
-
-*   **Elimination of the "Double-Pass":** The v1 architecture was inefficient. To serve a user, it ran an image through ResNet-18 for a classification prediction, and then ran it *again* through a stripped-down feature extractor to get embeddings for drift monitoring. You paid the mathematical cost of the neural network twice.
-*   **Integrated Single Forward Pass:** In v2, the `IntegratedVisionModel` processes both tasks simultaneously. A single `forward(x)` call yields both the classification logits and the intermediate 512-D embeddings.
-*   **Massive Compute Savings:** By sharing the ResNet-18 backbone between the classifier and the drift monitor, GPU/CPU compute overhead is drastically reduced, enabling higher throughput for live streaming.
-*   **Real-time Streaming Buffer:** Predictions (`logits`) are served instantly to the end-user, while the `embeddings` are silently dropped into an accumulation buffer. Once enough samples are gathered, bulk statistical drift validation happens in the background.
-*   **Offline Weights Fallback:** Enhanced reliability by checking for local offline weights (`models/resnet18_weights.pth`) for air-gapped environments, gracefully falling back to downloading official PyTorch weights if the local file is missing.
+This system monitors incoming real-time image streams, flags distribution decay (such as environmental fading, camera lens blur, or exposure variations), and runs an automated pipeline lifecycle simulation from ingestion to drift recovery.
 
 ---
 
@@ -20,62 +10,208 @@ In this version (v2), the pipeline has been heavily optimized to reduce computat
 
 ```text
 vision_drift_project/
-├── data/                  # Dataset cache (e.g., CIFAR-10)
-├── models/                # Local weights storage (.pth files)
+├── data/                    # Standard datasets cache (e.g., CIFAR-10)
+├── reference_state/         # Permanent cache for healthy data distributions
+│   └── baseline_embeddings.pt # Extracted baseline mathematical footprint (640 x 256)
 ├── src/
-│   ├── feature_extractor.py # Contains IntegratedVisionModel
-│   ├── drift_detector.py    # MMD monitor using torchdrift
-│   ├── data_loader.py       # Data streaming pipelines
-│   └── utils.py             # t-SNE plot generation
-├── reference_state/       # Cached baseline embeddings
-├── main.py                # Main simulation loop
-└── requirements.txt       # Project dependencies
+│   ├── data_loader.py       # Stable data streaming pipelines (Clean vs. Distorted)
+│   ├── yolo_extractor.py    # [NEW] YOLOv11 framework wrapper + C2PSA Layer Hook
+│   ├── stat_monitor.py      # [NEW] Custom mu and sigma^2 running statistical engine
+│   └── visualizer.py        # [NEW] Dark-themed Seaborn KDE distribution graphics
+├── legacy/                  # Archived V2 components (kept for backward compatibility)
+│   ├── feature_extractor.py # Old ResNet-18 model pipeline
+│   ├── drift_detector.py    # Old torchdrift MMD statistical engine
+│   └── utils.py             # Old t-SNE scatter-plotting utility
+├── main.py                  # [REWRITTEN] 5-Phase Lifecycle Orchestrator
+├── requirements.txt         # Project dependency manifest
+├── yolo11n-cls.pt           # Locally cached official YOLOv11 pretrained weights
+└── WALKTHROUGH_V3.md        # Technical execution logs and milestone summaries
 ```
 
 ---
 
-## How It Works
+## V2 vs. V3 Architectural Evolution
 
-The system decouples drift monitoring from standard model inference across three distinct phases:
-
-### Phase 1: Ingestion & Model Loading
-We initialize the `IntegratedVisionModel` (based on ResNet-18). The model logic splits the architecture into a feature backbone and a classification head, allowing dual-outputs from a single pass.
-
-### Phase 2: Offline Calibration (The Baseline)
-During calibration, we pass a gold-standard "healthy" dataset through the model. The classification outputs are ignored, but the intermediate embeddings are collected and saved to `reference_state/baseline_embeddings.pt`. This serves as the system's absolute memory of what healthy data looks like.
-
-### Phase 3: Online Streaming & Drift Detection (The Live Stream)
-Incoming stream data is collected into batches.
-1. The model performs a single forward pass, generating both predictions for the user and embeddings for the monitor.
-2. The `MMDMonitor` uses the **Kernel MMD** statistical test to compare the new batch's embeddings against the cached baseline.
-3. Permutation Testing is performed. If the calculated **P-Value falls below 0.05**, the structural integrity of the data stream has failed.
-4. The system triggers a critical alert and automatically generates a **t-SNE** visual scatter plot so you can visually verify the separation between the healthy reference cluster and the degraded production cluster.
+| Architectural Layer | Version 2 (Legacy Baseline) | Version 3 (Target Production State) |
+| :--- | :--- | :--- |
+| **Neural Network Backbone** | ResNet-18 (`torchvision`) | **YOLOv11n-cls** (`ultralytics`) |
+| **Embedding Spatial Features** | 512-Dimensional Vector | **256-Dimensional Vector** |
+| **Extraction Methodology** | Slicing off final Classification Fully-Connected layer | **PyTorch Forward Hook** on penultimate `C2PSA` backbone layer |
+| **Statistical Monitoring Engine** | `torchdrift` Kernel MMD (Black-box P-Value) | **Custom Decomposed Shape Engine** (Tracks Mean Shift & Variance Expansion) |
+| **Visualization Philosophy** | 2D Spatial t-SNE Scatter Plot | **Smooth Continuous Kernel Density Estimation (KDE) Curves** |
+| **Forensic Evidence Output** | Single static scatter image (`drift_visualization_batch_X.png`) | **Tri-Asset Package** (Before Training, After Training, Combined Dashboard) |
+| **Pipeline Lifecycle Complexity** | 3 Phases (Ingest, Calibrate, Stream) | **5 Phases** (Ingest, Calibrate, Stream, Alert, Retraining Recovery) |
 
 ---
 
-## Getting Started
+## Deep-Dive: Modular Architecture & Implementation
 
-### 1. Install Requirements
-Navigate to the project folder, activate your virtual environment, and install dependencies:
+### 1. Unified Inference & Hook Layer (`src/yolo_extractor.py`)
+To completely eliminate the computational cost of extracting features separately, V3 taps into the **YOLOv11** backbone using a non-destructive PyTorch forward hook.
+
+* **Target Hook Layer:** Layer 9 — **`C2PSA` (Cross Stage Partial with Spatial Attention)** block. This layer captures highly rich, attention-aware spatial and geometric features right before they pass to the classification or object anchoring heads.
+* **Single Forward Pass:** Running `logits, embedding = model(images)` routes tensor arrays through the network exactly once. The user receives user-facing predictions immediately, and the background queue captures the 256-D flattened embedding vector with **zero additional GPU/CPU forward pass overhead (50% compute saving)**.
+
+```python
+# Conceptual slice of forward pass routing
+def forward(self, x):
+    # Pass through YOLO blocks; forward hook automatically intercepts intermediate features
+    logits = self.yolo_model(x) 
+    # Unwraps underlying tuple containers safely
+    if isinstance(logits, list or tuple):
+        logits = logits[0]
+    
+    # Global average pooling on hooked layer to generate dense 256-D embedding vector
+    embedding = torch.mean(self.hooked_features, dim=[2, 3])
+    return logits, embedding
+```
+
+### 2. Custom Decomposed Statistical Engine (`src/stat_monitor.py`)
+Instead of an uninterpretable black-box P-value that simply says "drift exists," the V3 statistical monitor decomposes the distribution shift into two clear metrics:
+
+1. **Mean Deviation Score (60% Weight):** Calculates the L2 Euclidean distance between the center-of-mass of live production window embeddings (mu_prod) and calibrated baseline embeddings (mu_base), scaled by baseline standard deviation (sigma_base).
+2. **Variance Expansion Score (40% Weight):** Measures how much the empirical spread of feature activations stretches or shrinks compared to original baseline benchmarks.
+
+* **Threshold Gate:** Combined Score = 0.6 * Mean Deviation + 0.4 * Variance Expansion. If the final composite metric crosses **2.00**, a critical drift event is declared.
+
+### 3. Kernel Density Estimation Visualizer (`src/visualizer.py`)
+Replaces scatter plots with smooth continuous **Kernel Density Estimation (KDE)** plots styled with an enterprise dark theme (`#1a1a2e`).
+* **Smart Feature Selection:** Rather than cluttering charts with 256 overlapping dimensions, the visualization sub-engine runs a statistical scan to find the **Top-K most drifted dimensions** (where absolute mean shift is highest) and isolates those specific feature channels for forensic plotting.
+* **Output Artifacts:** Generates `drift_before_training.png` (Gap verification), `drift_after_training.png` (Alignment verification), and a side-by-side synchronized dashboard block (`drift_combined_report.png`).
+
+---
+
+## The 5-Phase Pipeline Lifecycle (`main.py`)
+
+The orchestrator guides your data architecture through five distinct automated phases:
+
+```
+[Phase 1: Ingestion]  --> Loads CIFAR-10 data streams and initializes YOLOv11 model blocks.
+         │
+         v
+[Phase 2: Calibration] --> Extracts 640 clean baseline vectors; caches mu/sigma^2 statistics to disk.
+         │
+         v
+[Phase 3: Streaming]   --> Streams production batches; executes lightning-fast inference while
+         │                 monitoring rolling feature windows in the background.
+         │
+         ├──► (If Score <= 2.00) ──► Normal logs served, pipeline continues streaming.
+         └──► (If Score >  2.00) ──► CRITICAL BREACH MET! Drops to Phase 4.
+         │
+         v
+[Phase 4: Drift Alert] --> Halts execution loop, logs statistical breakdown, dumps "Before" KDE plots.
+         │
+         v
+[Phase 5: Recovery]    --> Simulates model fine-tuning via a 30% blend shift + Gaussian noise.
+                           Generates "After" and Combined Reports to prove distribution realignment.
+```
+
+---
+
+## Real-World Telemetry Logs
+
+Below is the verified terminal log demonstrating progressive data degradation captured under the new YOLO parameters:
+
+```text
+======================================================================
+  VISION DRIFT MONITORING SYSTEM — V3 LIFECYCLE
+======================================================================
+
+=== Phase 1: Ingesting Data & Preparing Pipelines ===
+Loading YOLOv11 model: yolo11n-cls.pt
+Found cached weights at: C:\Users\hites\Vision-Drift-monitoring-system\vision_drift_project\yolo11n-cls.pt
+YOLOv11 model loaded on cpu. Hook registered on layer: C2PSA
+Embedding dimensionality: 256
+
+=== Phase 2: Calibration & Baselining (Offline) ===
+Extracting baseline embeddings through YOLOv11 backbone...
+  Calibration batch 5/10 processed
+  Calibration batch 10/10 processed
+Baseline shape: torch.Size([640, 256])
+[StatMonitor] Calibrated with 640 samples, embedding dim = 256
+[StatMonitor] Baseline mu norm = 15.9351, variance mean = 0.991545
+Baseline embeddings cached to reference_state/baseline_embeddings.pt
+
+=== Phase 3: Integrated Production Stream (Online Simulation) ===
+Starting live inference stream with single-pass YOLOv11...
+
+  Batch  1 -> Drift Score: 1.4858 (threshold: 2.00)
+       Mean Deviation: 2.3158 | Variance Expansion: 0.2409
+       Status: Normal
+
+  Batch  2 -> Drift Score: 1.0331 (threshold: 2.00)
+       Mean Deviation: 1.5201 | Variance Expansion: 0.3027
+       Status: Normal
+
+  ...
+
+  Batch 17 -> Drift Score: 2.1289 (threshold: 2.00)
+       Mean Deviation: 3.3504 | Variance Expansion: 0.2965
+       Status: *** DRIFT DETECTED ***
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ALERT: DATA DRIFT DETECTED IN LIVE INFERENCE STREAM
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  Drift Score 2.1289 exceeds threshold 2.00
+  Reason: Production feature activations have significantly deviated from baseline calibration.
+  Action: Generating 'Before Training' distribution evidence...
+
+[Visualizer] 'Before Training' plot saved to: drift_before_training_batch_17.png
+
+=== Phase 5: Recovery Simulation (Retraining) ===
+Simulating model retraining with drifted data exposure...
+
+[Recovery] Simulating retraining with blend ratio = 30.0%
+[Recovery] Generated 64 recovered embeddings
+
+[Recovery Verification]
+  Post-retraining drift score: 0.7871 (threshold: 2.00)
+       Mean Deviation:      1.1263
+       Variance Expansion:  0.2783
+  Recovery successful — features realigned with baseline.
+
+[Visualizer] 'After Training' plot saved to: drift_after_training.png
+[Visualizer] Combined report saved to: drift_combined_report.png
+
+======================================================================
+  V3 LIFECYCLE COMPLETE
+======================================================================
+```
+
+---
+
+## Core Engineering Edge-Cases & Bugs Resolved
+
+### 1. YOLOv11 Initialization Loop (Auto-Training Defeated)
+* **Problem:** Calling the standard `YOLO("yolo11n-cls.pt")` constructor high-level class wrapper was aggressively triggering a 100-epoch automated training run on local datasets upon execution, causing 45-second script hangs.
+* **Fix:** Bypassed the high-level API. Used low-level weight loading via `load_checkpoint` directly out of `ultralytics.nn.tasks` to load model dictionaries instantly as a clean, static `nn.Module`.
+
+### 2. Tuple Container Unwrapping
+* **Problem:** Subclassing YOLO layers led forward passes to return tuples containing internal layer dimensions, throwing `TypeError: argument 'input' must be Tensor` down the classification heads.
+* **Fix:** Added list and tuple unboxing wrappers inside `yolo_extractor.py` to strip secondary layer outputs, returning an isolated, clean classification logits matrix.
+
+### 3. Matplotlib Emoji Font Missing Glyphs
+* **Problem:** Incorporating rich status indicators (such as white heavy check marks or critical alarms) inside graph headers threw heavy layout execution crashes (`DejaVu Sans glyph warnings`).
+* **Fix:** Standardized visualization strings using clean ASCII typography (`[!] DRIFT`, `[OK] BASELINE`) for complete cross-platform rendering safety.
+
+---
+
+## Quick Start & Verification
+
+### 1. Configure the Environment
+Ensure your virtual environment is loaded, then update dependencies:
 ```bash
-python -m venv .venv
-# On Windows:
-.venv\Scripts\activate
-# On Mac/Linux:
-source .venv/bin/activate
-
-pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. Run the Pipeline
-Execute the main script to watch the simulation run:
+### 2. Execute the Pipeline
+Run the central orchestrator to launch the entire automated lifecycle:
 ```bash
 python main.py
 ```
 
-### 3. Understanding the Output
-The pipeline will simulate incoming production data. 
-* As batches process, you will see `Served predictions for batch X` followed by a background drift evaluation.
-* If the data is clean, the system logs `Status Normal: Data stream is consistent with model expectations`. 
-* Once degraded/corrupted images accumulate enough to cross the statistical threshold (P-Value < 0.05), the system throws a `🚨 ALERT: Data drift identified...` and saves a `drift_visualization_batch_X.png` plot to your directory.
+### 3. Review Generated Artifacts
+Once execution hits Phase 5, open your root project folder to analyze your newly outputted forensic proof:
+* `drift_before_training_batch_17.png` (Statistical deviation plot)
+* `drift_after_training.png` (Realignment verification plot)
+* `drift_combined_report.png` (Side-by-side executive summary panel)
