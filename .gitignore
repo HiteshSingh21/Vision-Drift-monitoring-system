@@ -158,4 +158,5 @@ vision_drift_project/models/*
 !vision_drift_project/models/.gitkeep
 vision_drift_project/reference_state/*
 !vision_drift_project/reference_state/.gitkeep
-*.png
+
+WALKTHROUGH_V3.md

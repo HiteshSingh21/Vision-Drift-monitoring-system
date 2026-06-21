@@ -1,7 +1,8 @@
 torch
 torchvision
-torchdrift
 scikit-learn
 matplotlib
+seaborn
 numpy
 tqdm
+ultralytics>=8.3.0
